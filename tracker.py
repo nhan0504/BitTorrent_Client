@@ -1,9 +1,10 @@
 import requests
 import bencodepy
 import struct
-from share_type import TorrentMetaData
+from share_type import TorrentMetaData, TrackerResponse
 
-def connect_to_tracker(torrent_meta_data: TorrentMetaData, peer_id):
+
+def connect_to_tracker(torrent_meta_data: TorrentMetaData, peer_id) -> TrackerResponse:
     announce_url = torrent_meta_data.announce
     port = 6881  
 
@@ -24,10 +25,8 @@ def connect_to_tracker(torrent_meta_data: TorrentMetaData, peer_id):
         response.raise_for_status()  
 
         tracker_response = bencodepy.decode(response.content)
-        return {
-            "interval": tracker_response[b'interval'],
-            "peers": parse_peers(tracker_response[b'peers'])
-        }
+        return TrackerResponse(tracker_response[b'interval'], parse_peers(tracker_response[b'peers']))
+        
 
     except requests.exceptions.RequestException as e:
         print(f"Failed to connect to tracker: {e}")
