@@ -18,6 +18,7 @@ class TorrentMetaData:
         self.info_hash = info_hash
         self.piece_length = piece_length
         self.name = name
+        self.length = length
         self.num_pieces = int (length / piece_length)
         self.hash = [pieces[i:i+20] for i in range(0, len(pieces), 20)]
 

@@ -42,11 +42,13 @@ def connect_to_peer(peer, info_hash, peer_id):
     
 def read_message(socket):
     length_bytes = socket.recv(4)
+
+    if not length_bytes:
+        return None  # connection closed
     message_length = struct.unpack("!I", length_bytes)[0]
     
-    # Check for keep-alive message (length == 0)
     if message_length == 0:
-        return None
+        return None  # Keep-alive message
     
     # Read the full message as indicated by the length prefix
     message = socket.recv(message_length)
@@ -56,16 +58,16 @@ def read_message(socket):
     return Message(id=message_id, payload=payload)
 
 def handle_message(message: Message, socket):
-    if message.id == MSG_ID.CHOKE:
+    if message.id == MSG_ID.CHOKE.value:
         print("I got choked")
-    elif message.id == MSG_ID.UNCHOKE:
+    elif message.id == MSG_ID.UNCHOKE.value:
         msg = read_message(socket=socket)
         handle_message(msg, socket)
-    elif message.id == MSG_ID.HAVE:
+    elif message.id == MSG_ID.HAVE.value:
         print("I have a piece")
-    elif message.id == MSG_ID.BITFIELD:
+    elif message.id == MSG_ID.BITFIELD.value:
         print("These are the pieces peer has")
-    elif message.id == MSG_ID.PIECE:
+    elif message.id == MSG_ID.PIECE.value:
         print("I send you this piece")
 
 def parse_bitfield(payload):
@@ -84,6 +86,7 @@ def peer_available_pieces(socket):
     return None
 
 def download_one_piece_from_peer(socket, pieces, job_queue: queue, torrent_meta_data: TorrentMetaData):
+    # If we haven't receive CHOKE message
     while True:
         try:
             piece_idx = job_queue.get(block=False)
@@ -93,13 +96,14 @@ def download_one_piece_from_peer(socket, pieces, job_queue: queue, torrent_meta_
                 # Break the piece down into 2^16 KB block for TCP request
                 # Build request message
                 for offset in range(0, torrent_meta_data.piece_length, BLOCK_LENGTH):
+                    # Build the REQUEST message for each block
                     if (offset + BLOCK_LENGTH) <= torrent_meta_data.piece_length:
                         block_length = BLOCK_LENGTH
                     else:
                         block_length = torrent_meta_data.piece_length - offset
                     
                     payload = struct.pack("!III", piece_idx, offset, block_length)
-                    request_msg = Message(MSG_ID.REQUEST, payload=payload)
+                    request_msg = Message(MSG_ID.REQUEST.value, payload=payload)
                     socket.sendall(request_msg.to_bytes())
 
                     # Get the response which is a Piece message
