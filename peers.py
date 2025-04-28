@@ -60,64 +60,82 @@ def download_available_pieces(
     conn: PeerConnection,
     torrent_meta: TorrentMetaData,
     needed_pieces: set[int],
-    file_handle
+    file_handle,
+    progress_callback=None
 ) -> None:
-    # Send interest message & wait
-    conn.send_interested()
-    bitfield = conn.await_unchoke_and_bitfield()
-    print("Start downloading pieces...")
-    num_pieces = torrent_meta.num_pieces
-    piece_len = torrent_meta.piece_length
-    total_length = torrent_meta.length
+    try:
+        # Send interest message & wait
+        conn.send_interested()
+        # Wait for the peer to send a bitfield message
+        conn.await_bitfield()
+        
+        num_pieces = torrent_meta.num_pieces
+        piece_len = torrent_meta.piece_length
 
-    for index in sorted(needed_pieces):
-        # Check if the peer has this piece
-        byte_i = index // 8
-        bit_i  = 7 - (index % 8)
-        if not (bitfield[byte_i] & (1 << bit_i)):
-            continue 
+        print("Start downloading pieces...")
+        for index in sorted(needed_pieces):
+            # Check if the peer has this piece
+            if index not in conn.available_pieces:
+                print(f"Peer does not have piece {index}, skipping")
+                continue 
 
-        # compute the length of the piece
-        if index == num_pieces - 1:
-            this_len = total_length - piece_len * (num_pieces - 1)
-        else:
-            this_len = piece_len
+            # compute the length of the piece
+            if index == num_pieces - 1:
+                this_len = torrent_meta.length - piece_len * (num_pieces - 1)
+            else:
+                this_len = piece_len
 
-        buffer = bytearray(this_len)
-        BLOCK_LENGTH = 16 * 1024
+            buffer = bytearray(this_len)
 
-        # Send request message for each block
-        for begin in range(0, this_len, BLOCK_LENGTH):
-            blen = min(BLOCK_LENGTH, this_len - begin)
-            conn.send_request(index, begin, blen)
-            print(f"Downloading piece {index}...")
+            # Send request message for each block
+            for begin in range(0, this_len, BLOCK_LENGTH):
+                blen = min(BLOCK_LENGTH, this_len - begin)
 
-            # wait for the matching PIECE
-            while True:
-                msg_id, payload = conn.handle_peer_messages()
+                # Wait until we are unchoked 
+                while conn.choked:
+                    msg_id, _ = conn.read_message()
+                    if msg_id == MSG_ID.UNCHOKE.value:
+                        conn.choked = False
+                    elif msg_id == MSG_ID.HAVE.value:
+                        (piece_index,) = struct.unpack(">I", payload)
+                        conn.available_pieces.add(piece_index)
                 
-                if msg_id == MSG_ID.PIECE.value:
-                    rec_index = struct.unpack(">I", payload[:4])[0]
-                    rec_begin = struct.unpack(">I", payload[4:8])[0]
-                    data = payload[8:]
-                    if rec_index == index and rec_begin == begin:
-                        buffer[begin:begin+len(data)] = data
-                        break
-                # Ignore for now
-                elif msg_id == MSG_ID.REQUEST.value:
-                    continue
-                elif msg_id == MSG_ID.CANCEL.value:
-                    continue
+                conn.send_request(index, begin, blen)
+                print(f"Downloading piece {index}...")
 
-        # verify SHA-1
-        if hashlib.sha1(buffer).digest() != torrent_meta.hash[index]:
-            continue 
+                # wait for the matching PIECE
+                while True:
+                    msg_id, payload = conn.handle_peer_messages()
+                    print(f"Received message ID: {msg_id}")
+                    
+                    if msg_id == MSG_ID.PIECE.value:
+                        rec_index = struct.unpack(">I", payload[:4])[0]
+                        rec_begin = struct.unpack(">I", payload[4:8])[0]
+                        data = payload[8:]
+                        if rec_index == index and rec_begin == begin:
+                            buffer[begin:begin+len(data)] = data
+                            break
+                    # Ignore for now
+                    elif msg_id == MSG_ID.REQUEST.value:
+                        continue
+                    elif msg_id == MSG_ID.CANCEL.value:
+                        continue
 
-        # write the piece into file at correct offset
-        file_handle.seek(index * piece_len)
-        file_handle.write(buffer)
-        file_handle.flush()
+            # verify SHA-1
+            if hashlib.sha1(buffer).digest() != torrent_meta.hash[index]:
+                continue 
 
-        # Remove the piece from the set of needed pieces
-        print(f"Downloaded piece {index}")
-        needed_pieces.remove(index)
+            # write the piece into file at correct offset
+            file_handle.seek(index * piece_len)
+            file_handle.write(buffer)
+            file_handle.flush()
+
+            # Remove the piece from the set of needed pieces
+            print(f"Downloaded piece {index}")
+            needed_pieces.remove(index)
+            if progress_callback:
+                progress_callback(torrent_meta.num_pieces - len(needed_pieces))
+    except ConnectionError as e:
+        print(f"[{conn.peer_id}] disconnected mid‐download: {e}")
+    finally:
+        conn.close()
