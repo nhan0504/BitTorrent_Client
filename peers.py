@@ -2,9 +2,9 @@ import socket
 import struct
 import queue
 import hashlib
-from share_type import TorrentMetaData, Message, MSG_ID
+from share_type import TorrentMetaData, Message, MSG_ID, PeerConnection
 
-BLOCK_LENGTH = 65536000
+BLOCK_LENGTH = 16 * 1024
 
 def create_handshake(info_hash, peer_id):
     pstrlen = 19  
@@ -14,15 +14,27 @@ def create_handshake(info_hash, peer_id):
     handshake = struct.pack(">B19s8s20s20s", pstrlen, pstr, reserved, info_hash, peer_id.encode('utf-8'))
     return handshake
 
+def parse_handshake(response: bytes) -> (bytes, str):
+    if len(response) != 68:
+        raise ValueError("Handshake must be exactly 68 bytes")
+
+    pstrlen, pstr, reserved, their_info_hash, raw_peer_id = struct.unpack(
+        ">B19s8s20s20s", response
+    )
+    if pstrlen != 19 or pstr != b"BitTorrent protocol":
+        raise ValueError("Invalid protocol header in handshake")
+
+    peer_id = raw_peer_id.decode("utf-8", errors="ignore")
+    return their_info_hash, peer_id
+
 def connect_to_peer(peer, info_hash, peer_id):
     ip = peer["ip"]
     port = peer["port"]
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(3)
     
     try:
-        # 1. Establish TCP connection
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(3)
-        
+        # 1. Establish TCP connection  
         sock.connect((ip, port))
 
         # 2. Send handshake
@@ -30,106 +42,82 @@ def connect_to_peer(peer, info_hash, peer_id):
         sock.sendall(handshake)
 
         response = sock.recv(68)
-        if len(response) == 68:
-            print(f"Connected successfully to {ip}:{port}")
-            return sock
-        else:
+        peer_info_hash, peer_id = parse_handshake(response)
+        if peer_info_hash != info_hash:
+            print(f"Peer {ip}:{port} has wrong info_hash, closing")
             sock.close()
-            return None 
-        
-    except (socket.timeout, ConnectionRefusedError, OSError) as e:
-        return None
-    
-def read_message(socket):
-    length_bytes = socket.recv(4)
-
-    if not length_bytes:
-        return None  # connection closed
-    message_length = struct.unpack("!I", length_bytes)[0]
-    
-    if message_length == 0:
-        return None  # Keep-alive message
-    
-    # Read the full message as indicated by the length prefix
-    message = socket.recv(message_length)
-    message_id = message[0]  
-    payload = message[1:]   
-
-    return Message(id=message_id, payload=payload)
-
-def handle_message(message: Message, socket):
-    if message.id == MSG_ID.CHOKE.value:
-        print("I got choked")
-    elif message.id == MSG_ID.UNCHOKE.value:
-        msg = read_message(socket=socket)
-        handle_message(msg, socket)
-    elif message.id == MSG_ID.HAVE.value:
-        print("I have a piece")
-    elif message.id == MSG_ID.BITFIELD.value:
-        print("These are the pieces peer has")
-    elif message.id == MSG_ID.PIECE.value:
-        print("I send you this piece")
-
-def parse_bitfield(payload):
-    pieces = set()
-    for byte_index, byte in enumerate(payload):
-        for bit in range(8):
-            if byte & (1 << (7 - bit)):
-                piece_index = byte_index * 8 + bit
-                pieces.add(piece_index)
-    return pieces
-
-def peer_available_pieces(socket):
-    message = read_message(socket=socket)
-    if message:
-        return parse_bitfield(message.payload)
-    return None
-
-def download_one_piece_from_peer(socket, pieces, job_queue: queue, torrent_meta_data: TorrentMetaData):
-    # If we haven't receive CHOKE message
-    while True:
-        try:
-            piece_idx = job_queue.get(block=False)
-            # Check if peer have the piece in the job
-            if (piece_idx in pieces):
-                # Download this piece
-                # Break the piece down into 2^16 KB block for TCP request
-                # Build request message
-                for offset in range(0, torrent_meta_data.piece_length, BLOCK_LENGTH):
-                    # Build the REQUEST message for each block
-                    if (offset + BLOCK_LENGTH) <= torrent_meta_data.piece_length:
-                        block_length = BLOCK_LENGTH
-                    else:
-                        block_length = torrent_meta_data.piece_length - offset
-                    
-                    payload = struct.pack("!III", piece_idx, offset, block_length)
-                    request_msg = Message(MSG_ID.REQUEST.value, payload=payload)
-                    socket.sendall(request_msg.to_bytes())
-
-                    # Get the response which is a Piece message
-                    message = read_message(socket=socket)
-                    
-                    # Min heap to hold all the block 
-                    blocks_minheap = queue.PriorityQueue()
-                    piece_index = struct.unpack("!I", message.payload[0:4])[0]
-                    begin = struct.unpack("!I", message.payload[4:8])[0]
-                    block = message.payload[8:]
-
-                    blocks_minheap.put((begin, block))
-
-                    # Assemble the block into a whole piece
-                    while not blocks_minheap.empty():
-                        piece += blocks_minheap.get()[1]
-
-                    # Check the piece hash
-                    downloaded_piece_hash = hashlib.sha1(piece).digest()
-                    if downloaded_piece_hash == torrent_meta_data.hash[piece_idx]:
-                        # Return the downloaded piece in the end
-                        return piece
-                    else:
-                        job_queue.put(piece_idx)             
-            else:
-                job_queue.put(piece_idx)
-                continue
-        except queue.Empty:
             return None
+
+        print("Connect sucessfully to peer:", ip, port)
+        return PeerConnection(sock, peer_id, info_hash)
+        
+    except (socket.timeout, ConnectionRefusedError, ValueError, ConnectionError) as e:
+        print(f"connect_to_peer({ip}:{port}) failed: {e}")
+        sock.close()
+        return None
+
+def download_available_pieces(
+    conn: PeerConnection,
+    torrent_meta: TorrentMetaData,
+    needed_pieces: set[int],
+    file_handle
+) -> None:
+    # Send interest message & wait
+    conn.send_interested()
+    bitfield = conn.await_unchoke_and_bitfield()
+    print("Start downloading pieces...")
+    num_pieces = torrent_meta.num_pieces
+    piece_len = torrent_meta.piece_length
+    total_length = torrent_meta.length
+
+    for index in sorted(needed_pieces):
+        # Check if the peer has this piece
+        byte_i = index // 8
+        bit_i  = 7 - (index % 8)
+        if not (bitfield[byte_i] & (1 << bit_i)):
+            continue 
+
+        # compute the length of the piece
+        if index == num_pieces - 1:
+            this_len = total_length - piece_len * (num_pieces - 1)
+        else:
+            this_len = piece_len
+
+        buffer = bytearray(this_len)
+        BLOCK_LENGTH = 16 * 1024
+
+        # Send request message for each block
+        for begin in range(0, this_len, BLOCK_LENGTH):
+            blen = min(BLOCK_LENGTH, this_len - begin)
+            conn.send_request(index, begin, blen)
+            print(f"Downloading piece {index}...")
+
+            # wait for the matching PIECE
+            while True:
+                msg_id, payload = conn.handle_peer_messages()
+                
+                if msg_id == MSG_ID.PIECE.value:
+                    rec_index = struct.unpack(">I", payload[:4])[0]
+                    rec_begin = struct.unpack(">I", payload[4:8])[0]
+                    data = payload[8:]
+                    if rec_index == index and rec_begin == begin:
+                        buffer[begin:begin+len(data)] = data
+                        break
+                # Ignore for now
+                elif msg_id == MSG_ID.REQUEST.value:
+                    continue
+                elif msg_id == MSG_ID.CANCEL.value:
+                    continue
+
+        # verify SHA-1
+        if hashlib.sha1(buffer).digest() != torrent_meta.hash[index]:
+            continue 
+
+        # write the piece into file at correct offset
+        file_handle.seek(index * piece_len)
+        file_handle.write(buffer)
+        file_handle.flush()
+
+        # Remove the piece from the set of needed pieces
+        print(f"Downloaded piece {index}")
+        needed_pieces.remove(index)

@@ -1,4 +1,5 @@
 import struct
+import socket
 from enum import Enum
 
 class MSG_ID(Enum):
@@ -41,3 +42,123 @@ class Message:
         length_prefix = struct.pack("!I", message_length)
         message_id_byte = bytes(self.id)
         return length_prefix + message_id_byte + self.payload
+
+class PeerConnection:
+    def __init__(self, sock: socket.socket, peer_id: str, info_hash: bytes):
+        self.sock       = sock
+        self.peer_id    = peer_id
+        self.info_hash  = info_hash
+        self.available_pieces   = set()    
+        self.choked     = True
+        self.interested = False
+    
+    def recv_exact(self, n: int) -> bytes:
+        buf = b""
+        while len(buf) < n:
+            chunk = self.sock.recv(n - len(buf))
+            if not chunk:
+                raise ConnectionError("Peer closed connection")
+            buf += chunk
+        return buf
+
+    def parse_bitfield(self, payload: bytes):
+        self.available_pieces.clear()
+        for i in range(len(payload) * 8):
+            byte_index = i // 8
+            bit_offset = 7 - (i % 8)
+            if payload[byte_index] & (1 << bit_offset):
+                self.available_pieces.add(i)
+
+    def send(self, data: bytes):
+        self.sock.sendall(data)
+    
+    def send_interested(self):
+        length_prefix = struct.pack(">I", 1)                   
+        msg_id = bytes([MSG_ID.INTERESTED.value])     
+        self.send(length_prefix + msg_id)
+        self.interested = True
+
+    def send_request(self, index: int, begin: int, length: int):
+        length_prefix = struct.pack(">I", 13)
+        msg_id        = bytes([MSG_ID.REQUEST.value])
+        body          = struct.pack(">III", index, begin, length)
+        self.send(length_prefix + msg_id + body)
+
+    def read_message(self):
+        # 1) read the 4-byte length prefix
+        raw_len = self.recv_exact(4)
+        msg_len = struct.unpack(">I", raw_len)[0]
+
+        # 2) keep-alive has no payload
+        if msg_len == 0:
+            return ("keep-alive", None)
+
+        # 3) read the rest (1-byte ID + (msg_len-1) payload)
+        data = self.recv_exact(msg_len)
+        msg_id  = data[0]
+        payload = data[1:]
+        return msg_id, payload
+
+    def handle_peer_messages(self):
+        """
+        Continuously read messages, update state for keep-alive, choke, unchoke,
+        have, bitfield—and return the first non-control message.
+
+        Returns:
+            (msg_id, payload) for messages the caller needs to act on (e.g. PIECE).
+        """
+        while True:
+            msg_id, payload = self.read_message()
+
+            # keep-alive
+            if msg_id == "keep-alive":
+                continue
+
+            # choke
+            if msg_id == MSG_ID.CHOKE.value:
+                self.choked = True
+                print("Got choked")
+                continue
+
+            # unchoke
+            if msg_id == MSG_ID.UNCHOKE.value:
+                self.choked = False
+                print("Got unchoked")
+                continue
+
+            # have
+            if msg_id == MSG_ID.HAVE.value:
+                (piece_index,) = struct.unpack(">I", payload)
+                self.available_pieces.add(piece_index)
+                continue
+
+            # bitfield
+            if msg_id == MSG_ID.BITFIELD.value:
+                self.parse_bitfield(payload)
+                continue
+
+            # 6) everything else (REQUEST, PIECE, CANCEL) bubble up
+            return msg_id, payload
+
+    def await_unchoke_and_bitfield(self):
+        while True:
+            msg_id, payload = self.read_message()
+
+            # keep-alive -> ignore
+            if msg_id == "keep-alive":
+                continue
+
+            # BITFIELD -> record which pieces the peer has
+            if msg_id == MSG_ID.BITFIELD.value:
+                self.bitfield = payload
+
+            # UNCHOKE: they’ve unchoked us
+            elif msg_id == MSG_ID.UNCHOKE.value:
+                self.choked = False
+
+            # Break when we have both a bitfield and unchoke message
+            if self.bitfield is not None and not self.choked:
+                return self.bitfield
+
+    def close(self):
+        self.sock.close()
