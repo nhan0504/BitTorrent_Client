@@ -68,6 +68,7 @@ class TorrentDownloaderApp:
             return
 
         total = meta.num_pieces
+        print(f"Total pieces: {total}")
         self.progress.config(maximum=total, value=0)
 
         self.status.config(text="Contacting tracker…")
@@ -140,63 +141,3 @@ class TorrentDownloaderApp:
 
 if __name__ == "__main__":
     TorrentDownloaderApp()
-
-
-
-
-# def main():
-#     root = tk.Tk()
-#     root.withdraw()  
-#     file_path = filedialog.askopenfilename(
-#         title="Select a Torrent File",
-#         filetypes=[("Torrent Files", "*.torrent")]
-#     )
-
-#     torrent_meta_data = parse_torrent_file(file_path)
-#     my_id = generate_peer_id()
-
-#     # Connect to tracker
-#     tracker_resp = connect_to_tracker(torrent_meta_data, my_id)
-#     last_announce = time.time()
-#     interval = tracker_resp.interval 
-
-#     # List of peer to connect to
-#     peers_list = tracker_resp.peers
-
-#     out_fname = torrent_meta_data.name.decode("utf-8")
-
-#     # Create a file to save the downloaded data
-#     with open(out_fname, "wb") as f:
-#         f.truncate(torrent_meta_data.length)
-
-#     # set of needed pieces
-#     needed = set(range(torrent_meta_data.num_pieces))
-
-#     with open(out_fname, "r+b") as f:
-#         for peer in peers_list:
-#             if not needed:
-#                 break
-#             # Check if we need to re-announce
-#             if time.time() - last_announce > interval:
-#                 print("Re-announcing to tracker …")
-#                 tracker_resp = connect_to_tracker(torrent_meta_data, my_id)
-#                 new_peers_list = tracker_resp.peers
-#                 peers_list.append(new_peers_list)
-#                 last_announce = time.time()
-#             print(f"Connecting to {peer['ip']}:{peer['port']} …")
-#             conn = connect_to_peer(peer, torrent_meta_data.info_hash, my_id)
-#             if not conn:
-#                 continue
-
-#             try:
-#                 download_available_pieces(conn, torrent_meta_data, needed, f)
-#             finally:
-#                 conn.close()
-
-#     if not needed:
-#         print(f"Finish downloading: {out_fname}")
-#     else:
-#         print("All peers failed. Could not download file.")
-
-# if __name__ == "__main__":
-#     main()

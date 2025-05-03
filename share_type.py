@@ -1,5 +1,6 @@
 import struct
 import socket
+import math
 from enum import Enum
 
 class MSG_ID(Enum):
@@ -20,7 +21,7 @@ class TorrentMetaData:
         self.piece_length = piece_length
         self.name = name
         self.length = length
-        self.num_pieces = int (length / piece_length)
+        self.num_pieces = math.ceil(length / piece_length)
         self.hash = [pieces[i:i+20] for i in range(0, len(pieces), 20)]
 
     def get_pieces_hash_array(self, chunk_size = 20) -> list[bytes]:
@@ -119,7 +120,7 @@ class PeerConnection:
             # unchoke
             if msg_id == MSG_ID.UNCHOKE.value:
                 self.choked = False
-                print("Got unchoked in handle_peer_messages")
+                print("Got unchoked")
                 continue
 
             # have

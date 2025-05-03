@@ -42,6 +42,7 @@ def connect_to_peer(peer, info_hash, peer_id):
         sock.sendall(handshake)
 
         response = sock.recv(68)
+        print("raw handshake:", response[:20], repr(response[20:]))
         peer_info_hash, peer_id = parse_handshake(response)
         if peer_info_hash != info_hash:
             print(f"Peer {ip}:{port} has wrong info_hash, closing")
@@ -72,6 +73,7 @@ def download_available_pieces(
         num_pieces = torrent_meta.num_pieces
         piece_len = torrent_meta.piece_length
 
+
         print("Start downloading pieces...")
         for index in sorted(needed_pieces):
             # Check if the peer has this piece
@@ -101,12 +103,10 @@ def download_available_pieces(
                         conn.available_pieces.add(piece_index)
                 
                 conn.send_request(index, begin, blen)
-                print(f"Downloading piece {index}...")
 
                 # wait for the matching PIECE
                 while True:
                     msg_id, payload = conn.handle_peer_messages()
-                    print(f"Received message ID: {msg_id}")
                     
                     if msg_id == MSG_ID.PIECE.value:
                         rec_index = struct.unpack(">I", payload[:4])[0]
